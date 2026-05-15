@@ -117,9 +117,16 @@ def get_import_path(proto_file_path: str, import_path: str) -> str:
     """
     # Get the directory of the current proto file
     proto_dir = os.path.dirname(proto_file_path)
-    
-    # Calculate the absolute path of the import file
-    import_abs_path = os.path.normpath(os.path.join(proto_dir, import_path))
+
+    # Determine how to resolve the import:
+    # - If the import path starts with './' or '../', treat it as *relative* to
+    #   the current proto file directory.
+    # - Otherwise, treat it as rooted relative to the proto include roots, as
+    #   protoc normally does for imports like "ats2/types/identifier.proto".
+    if import_path.startswith("./") or import_path.startswith("../"):
+        import_abs_path = os.path.normpath(os.path.join(proto_dir, import_path))
+    else:
+        import_abs_path = os.path.normpath(import_path)
     
     # Replace the .proto extension with .proto.gd
     import_gd_path = os.path.splitext(import_abs_path)[0] + ".proto.gd"
@@ -186,8 +193,10 @@ def generate_gdscript(request: plugin_pb2.CodeGeneratorRequest) -> plugin_pb2.Co
         global package_name
         package_name = proto_file.package
 
-        proto_file_name = os.path.splitext(os.path.basename(proto_file.name))[0]
-        file_name = f"{proto_file_name}.proto.gd"
+        # Preserve the original proto file path (relative to the proto include roots)
+        # so that protoc will create the same folder structure under --gdscript_out.
+        proto_path_no_ext = os.path.splitext(proto_file.name)[0]
+        file_name = f"{proto_path_no_ext}.proto.gd"
         file = response.file.add()
         file.name = file_name
         
@@ -211,11 +220,23 @@ def generate_gdscript(request: plugin_pb2.CodeGeneratorRequest) -> plugin_pb2.Co
             file.content += generate_message_class(message_type, 0, package_name)
             # Add separator between message types
             file.content += "# =========================================\n\n"
-            
+
+    # Advertise support for proto3 optional fields so protoc accepts optional in proto3 syntax.
+    # This relies on the CodeGeneratorResponse.Feature.FEATURE_PROTO3_OPTIONAL flag
+    # being present in the version of google.protobuf used at runtime.
+    try:
+        response.supported_features |= plugin_pb2.CodeGeneratorResponse.Feature.FEATURE_PROTO3_OPTIONAL
+    except AttributeError:
+        # Older protobuf versions may not define FEATURE_PROTO3_OPTIONAL.
+        # In that case we simply don't set the flag; protoc will emit a warning
+        # or error, but the generator itself can still function for other cases.
+        pass
+
     return response
 
 
 def generate_message_class(message_type: MessageType, indent_level: int = 0, msg_package_name="") -> str:
+    print(f"SK -- generate message class: {message_type.name}, package: {msg_package_name}", file=sys.stderr)
 
 #    global package_name
     gd_msg = gd_protobuf_info.init_message_type(message_type, msg_package_name)
@@ -429,11 +450,11 @@ def generate_init_method(message_type: MessageType, gd_message_type: GDMessageTy
 
     if len(message_type.field) <= 0:
         content += f"{indent}\tpass"
-        return
 
     for gd_field in gd_message_type.field_list:
         if isinstance(gd_field, GDField):
-            content += f"{gd_field.field_clear(indent + '\t')}\n"
+            # Each clear call should be on its own indented line in GDScript.
+            content += gd_field.field_clear(indent + "\t") + "\n"
     content += "\n"
     return content
 

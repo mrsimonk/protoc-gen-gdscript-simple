@@ -30,7 +30,9 @@ class GDField:
     def field_define(self, indent: str, define_name: str = None, flag: int = 0)->str:
         if define_name is None:
             define_name = self.field_name()
-        return f"{indent}var {define_name}: {self.field_type_name()} = {self.default_value}"
+        # Use an untyped variable declaration to avoid invalid or overly
+        # specific type hints (especially for message/enum types).
+        return f"{indent}var {define_name} = {self.default_value}"
 
     def field_clear(self, indent: str) -> str:
         return f"{indent}self.{self.field_name()} = {self.default_value}"
@@ -95,13 +97,16 @@ class GDMessageField(GDField):
     def field_define(self, indent: str, define_name: str = None, flag: int = 0)->str:
         if define_name is None:
             define_name = self.field_name()
+        # For message fields, declare without a static type hint so that
+        # Godot's type system doesn't have to resolve package-qualified names.
         if flag == 0:
-            return f"{indent}var {define_name}: {self.field_type_name()} = {self.default_value}"
+            return f"{indent}var {define_name} = {self.default_value}"
         else:
-            return f"{indent}var {define_name}: {self.field_type_name()} = {self.field_type_name()}.new()"
+            return f"{indent}var {define_name} = {self.field_type_name()}.new()"
 
     def field_clear(self, indent: str) -> str:
-        content = f"{indent}if self.{self.field_name()} != null:"
+        # Clear nested message fields with a properly formatted multiline if-block.
+        content = f"{indent}if self.{self.field_name()} != null:\n"
         content += f"{indent}\tself.{self.field_name()}.clear()"
         return content
 
@@ -179,10 +184,13 @@ class GDRepeatedField(GDField):
         self.sub_field = field
         # Make field name private
 #        self.name = "_" + name
-        super().create(name, number, field_type, f"Array[{self.sub_field.field_type_name()}]", "[]", "")
+        # Use a generic Array container type; element type hints will be kept
+        # loose (Variant) to avoid invalid qualified type names.
+        super().create(name, number, field_type, "Array", "[]", "")
 
     def field_clear(self, indent: str) -> str:
-        return f"{indent}self.{self.method_field_clear_name()}"
+        # Call the generated clear_* method to reset the repeated field.
+        return f"{indent}self.{self.method_field_clear_name()}()"
 
 
     def field_merge(self, indent: str, other: str) -> str:
@@ -231,15 +239,18 @@ class GDRepeatedField(GDField):
         content += f"{indent}func {self.method_field_size_name()}() -> int:\n"
         content += f"{indent}\treturn self.{self.field_size_name()}\n"
         content += f"{indent}## Get {self.field_name()}\n"
-        content += f"{indent}func {self.method_field_get_array_name()}() -> {self.field_type_name()}:\n"
+        # Expose the underlying Array without an element type annotation.
+        content += f"{indent}func {self.method_field_get_array_name()}() -> Array:\n"
         content += f"{indent}\treturn self.{self.field_name()}.slice(0, self.{self.field_size_name()})\n"
         content += f"{indent}## Get {self.field_name()} item \n"
-        content += f"{indent}func {self.method_field_get_name()}(index: int) -> {self.sub_field.field_type_name()}: # index begin from 1\n"
+        # Individual items are treated as Variant to avoid invalid qualified
+        # type names in function signatures.
+        content += f"{indent}func {self.method_field_get_name()}(index: int) -> Variant: # index begin from 1\n"
         content += f"{indent}\tif {self._index_check_content()}:\n"
         content += f"{indent}\t\treturn self.{self.field_name()}[index - 1]\n"
         content += f"{indent}\treturn {self.sub_field.default_value}\n"
         content += f"{indent}## Add {self.field_name()}\n"
-        content += f"{indent}func {self.method_field_add_name()}(item: {self.sub_field.field_type_name()}) -> {self.sub_field.field_type_name()}:\n"
+        content += f"{indent}func {self.method_field_add_name()}(item: Variant) -> Variant:\n"
         content += f"{indent}\tif self.{self.field_size_name()} >= 0 and self.{self.field_size_name()} < self.{self.field_name()}.size():\n"
         content += f"{indent}\t\tself.{self.field_name()}[self.{self.field_size_name()}] = item\n"
         content += f"{indent}\telse:\n"
@@ -412,40 +423,32 @@ def create_gd_field(gd_msg: GDMessageType, descriptor: Descriptor, field: FieldD
     is_map: bool = False
     #create_field_func = lambda f: GDMapField() if is_map else GDRepeatedField() if f.label == FieldDescriptor.LABEL_REPEATED else GDField()
 
+    # First, detect and resolve real map fields (which compile to nested *Entry messages).
     if field.type == FieldDescriptor.TYPE_MESSAGE and field.label == FieldDescriptor.LABEL_REPEATED and field.type_name:
         type_name = field.type_name
         if type_name.startswith("."):
             type_name = type_name[1:]
         parts = type_name.split(".")
         if len(parts) > 1 and parts[-1].endswith("Entry"):
-            is_map = True
+            # Only treat as a map if we can resolve the nested Entry type on this descriptor.
+            map_type = None
+            for nested_type in descriptor.nested_type:
+                if nested_type.name == parts[-1]:
+                    map_type = nested_type
+                    break
+
+            if map_type and len(map_type.field) >= 2:
+                is_map = True
+                gd_field = GDMapField()
+                key_field = create_gd_field(gd_msg, descriptor, map_type.field[0])
+                value_field = create_gd_field(gd_msg, descriptor, map_type.field[1])
+                gd_field.create(field.name, field.number, field.type, key_field, value_field)
+                return gd_field
 
     gd_field: GDField = None #create_field_func(field)
     real_type = gd_msg.real_type_name(field.type_name)
 
-    if is_map:
-        map_type = None
-
-        type_name = field.type_name
-        if type_name.startswith("."):
-            type_name = type_name[1:]
-        parts = type_name.split(".")
-
-        for nested_type in descriptor.nested_type:
-            if nested_type.name == parts[-1]:
-                map_type = nested_type
-                break
-
-        if map_type and len(map_type.field) >= 2:
-            gd_field = GDMapField()
-            key_field = create_gd_field(gd_msg, descriptor, map_type.field[0])
-            value_field = create_gd_field(gd_msg, descriptor, map_type.field[1])
-            gd_field.create(field.name, field.number, field.type, key_field, value_field)
-        else:
-            gd_field = GDField()
-            gd_field.create(f"m_unknown_{field.name}", field.number, field.type, f"m_unknown_{map_type}", f"unknown_{na}", "unknown")
-            return gd_field
-    elif field.type == FieldDescriptor.TYPE_STRING:
+    if field.type == FieldDescriptor.TYPE_STRING:
         gd_field = GDField()
         default_value = default_value_func("")
         gd_field.create(field.name, field.number, field.type, "String", f"\"{default_value}\"", "string")
@@ -503,11 +506,19 @@ def create_gd_field(gd_msg: GDMessageType, descriptor: Descriptor, field: FieldD
         gd_field = GDMessageField()
         gd_field.create(field.name, field.number, field.type, real_type, "null", "message")
     else:
+        # Unknown / unsupported field type: fall back to a basic GDField so we
+        # never return or wrap a None gd_field.
+        gd_field = GDField()
         gd_field.create("unknown", field.number, field.type, f"unknown_{field.type}", "unknown", "unknown")
         return gd_field
 
 
     if field.label == FieldDescriptor.LABEL_REPEATED and field.type != FieldDescriptor.TYPE_BYTES and is_map == False:
+        # Defensive: ensure we have a concrete sub_field to wrap.
+        if gd_field is None:
+            gd_field = GDField()
+            gd_field.create(field.name, field.number, field.type, "Variant", "null", "unknown")
+
         repeated_field = GDRepeatedField()
         repeated_field.create(field.name, field.number, field.type, gd_field)
         return repeated_field
