@@ -158,7 +158,8 @@ def generate_imports(proto_file) -> str:
     # Add imports for other proto files
     for dependency in proto_file.dependency:
         import_path = get_import_path(proto_file.name, dependency)
-        content += f'const {os.path.splitext(os.path.basename(dependency))[0]} = preload("{import_path}")\n'
+        alias = os.path.splitext(os.path.basename(dependency))[0]
+        content += f'const {alias} = preload("{import_path}")\n'
     
     if content:
         content += "\n"
@@ -166,19 +167,6 @@ def generate_imports(proto_file) -> str:
     return content
 
 package_name = ""
-def real_type_name(type_full_name: string):
-    if len(type_full_name) <= 0:
-        return type_full_name
-
-    if type_full_name[0] == '.':
-        type_full_name = type_full_name[1:]
-
-    if len(package_name) <= 0:
-        return type_full_name
-
-    # Remove package name
-    return type_full_name.replace(package_name + ".", "")
-
 def generate_gdscript(request: plugin_pb2.CodeGeneratorRequest) -> plugin_pb2.CodeGeneratorResponse:
     """Generate GDScript code from the request."""
     response = plugin_pb2.CodeGeneratorResponse()
@@ -203,6 +191,19 @@ def generate_gdscript(request: plugin_pb2.CodeGeneratorRequest) -> plugin_pb2.Co
         # Initialize content with package name
         file.content = f"# Package: {package_name}\n\n"
         
+        # Build a mapping from imported protobuf package names to the preload
+        # aliases we use in this generated file. We derive the foreign package
+        # names from the request's proto_file descriptors.
+        package_aliases: dict[str, str] = {}
+        dep_pkg_by_name: dict[str, str] = {pf.name: pf.package for pf in request.proto_file}
+
+        for dependency in proto_file.dependency:
+            dep_pkg = dep_pkg_by_name.get(dependency, "")
+            if not dep_pkg:
+                continue
+            alias = os.path.splitext(os.path.basename(dependency))[0]
+            package_aliases[dep_pkg] = alias
+
         # Add imports
         file.content += generate_imports(proto_file)
         
@@ -216,8 +217,10 @@ def generate_gdscript(request: plugin_pb2.CodeGeneratorRequest) -> plugin_pb2.Co
             if not message_type.name:
                 continue
                 
-            # Generate message class line by line
-            file.content += generate_message_class(message_type, 0, package_name)
+            # Generate message class line by line, passing package_aliases so
+            # that field generation can resolve foreign types via preload
+            # aliases rather than package-qualified names.
+            file.content += generate_message_class(message_type, 0, package_name, package_aliases)
             # Add separator between message types
             file.content += "# =========================================\n\n"
 
@@ -235,11 +238,13 @@ def generate_gdscript(request: plugin_pb2.CodeGeneratorRequest) -> plugin_pb2.Co
     return response
 
 
-def generate_message_class(message_type: MessageType, indent_level: int = 0, msg_package_name="") -> str:
+def generate_message_class(message_type: MessageType, indent_level: int = 0, msg_package_name: str = "", package_aliases: dict | None = None) -> str:
     print(f"SK -- generate message class: {message_type.name}, package: {msg_package_name}", file=sys.stderr)
 
-#    global package_name
-    gd_msg = gd_protobuf_info.init_message_type(message_type, msg_package_name)
+    # Build a GDMessageType enriched with package alias information so that
+    # field generation can resolve foreign message/enum types to the correct
+    # preload alias references (e.g. messages.MessageHeader).
+    gd_msg = gd_protobuf_info.init_message_type(message_type, msg_package_name, package_aliases)
 
     """Generate a message class."""
     content = ""
@@ -262,7 +267,7 @@ def generate_message_class(message_type: MessageType, indent_level: int = 0, msg
         if nested_type.options.map_entry:
             # This is a map field
             continue
-        content += generate_message_class(nested_type, indent_level + 1, msg_package_name)
+        content += generate_message_class(nested_type, indent_level + 1, msg_package_name, package_aliases)
 
     # Generate Init method
     content += generate_init_method(message_type, gd_msg, indent + "\t")

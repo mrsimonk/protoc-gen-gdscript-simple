@@ -386,10 +386,15 @@ class GDMapField(GDField):
         return content
 
 class GDMessageType:
-    def __init__(self, descriptor: Descriptor, package_name: str = ""):
+    def __init__(self, descriptor: Descriptor, package_name: str = "", package_aliases: dict | None = None):
         self.descriptor = descriptor
         self.package_name = package_name
-#        self.field_dic = {}
+        # Mapping from foreign protobuf package names to the local preload
+        # aliases used in the generated GDScript (e.g. "ats2.types.messages"
+        # -> "messages"). This allows us to resolve fully-qualified
+        # protobuf type names to the correct alias-based GDScript references.
+        self.package_aliases = package_aliases or {}
+        #        self.field_dic = {}
         self.field_list = []
 
     def add_field(self, field: GDField):
@@ -404,17 +409,37 @@ class GDMessageType:
 #        return self.field_list[number]
 
     def real_type_name(self, type_full_name: str)->str:
-        if len(type_full_name) <= 0:
+        """Resolve a protobuf type name to the GDScript reference to use.
+
+        This prefers local (same-package) names, but for foreign packages it
+        uses the preload aliases passed in from the generator so that we emit
+        expressions like `messages.MessageHeader` instead of a
+        package-qualified protobuf name such as
+        `ats2.types.messages.MessageHeader`, which GDScript cannot resolve.
+        """
+        if not type_full_name:
             return type_full_name
 
+        # Strip leading dot from fully-qualified type names.
         if type_full_name[0] == '.':
             type_full_name = type_full_name[1:]
 
-        if len(self.package_name) <= 0:
-            return type_full_name
+        # Same-package types: drop the package prefix entirely so we refer to
+        # the local class name (and nested names, if any).
+        if self.package_name and type_full_name.startswith(self.package_name + "."):
+            return type_full_name[len(self.package_name) + 1 :]
 
-        # Remove package name
-        return type_full_name.replace(self.package_name + ".", "")
+        # Imported types: look for a matching foreign package and rewrite to
+        # use its preload alias plus the remaining type path.
+        for foreign_pkg, alias in self.package_aliases.items():
+            if type_full_name.startswith(foreign_pkg + "."):
+                remainder = type_full_name[len(foreign_pkg) + 1 :]
+                return f"{alias}.{remainder}"
+
+        # Fallback: return the original (minus any leading dot). This keeps
+        # behaviour unchanged for types we cannot resolve via aliases, though
+        # it may still produce package-qualified names.
+        return type_full_name
 
 def create_gd_field(gd_msg: GDMessageType, descriptor: Descriptor, field: FieldDescriptor) ->GDField:
    # default_value_func = lambda default : field.default_value if hasattr(field, 'default_value') else default
@@ -525,8 +550,8 @@ def create_gd_field(gd_msg: GDMessageType, descriptor: Descriptor, field: FieldD
 
     return gd_field
 
-def init_message_type( descriptor: Descriptor, package_name: str) -> GDMessageType:
-    gd_message_type = GDMessageType(descriptor, package_name)
+def init_message_type( descriptor: Descriptor, package_name: str, package_aliases: dict | None = None) -> GDMessageType:
+    gd_message_type = GDMessageType(descriptor, package_name, package_aliases)
 
     for field in descriptor.field:
         gd_field = create_gd_field(gd_message_type, descriptor, field)
