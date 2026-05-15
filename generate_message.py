@@ -239,8 +239,6 @@ def generate_gdscript(request: plugin_pb2.CodeGeneratorRequest) -> plugin_pb2.Co
 
 
 def generate_message_class(message_type: MessageType, indent_level: int = 0, msg_package_name: str = "", package_aliases: dict | None = None) -> str:
-    print(f"SK -- generate message class: {message_type.name}, package: {msg_package_name}", file=sys.stderr)
-
     # Build a GDMessageType enriched with package alias information so that
     # field generation can resolve foreign message/enum types to the correct
     # preload alias references (e.g. messages.MessageHeader).
